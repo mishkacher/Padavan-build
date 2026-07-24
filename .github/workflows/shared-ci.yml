@@ -1,0 +1,27 @@
+name: Shared CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Select runner pool
+        required: true
+        type: choice
+        default: any
+        options:
+          - any
+          - mac
+          - vds
+          - windows
+          - backtester
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shared-ci:
+    uses: MishkaStrategy/ci-workflows/.github/workflows/shared-self-hosted-ci.yml@main
+    with:
+      target: ${{ inputs.target || 'any' }}
