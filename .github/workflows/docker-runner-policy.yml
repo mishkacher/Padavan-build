@@ -1,4 +1,4 @@
-name: Docker runner policy
+name: Dependency runner policy
 
 on:
   pull_request:
@@ -18,16 +18,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: docker-runner-policy-${{ github.workflow }}-${{ github.ref }}
+  group: dependency-runner-policy-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  audit-docker-routing:
+  audit-dependency-routing:
     runs-on: [self-hosted, fast]
     timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify Docker jobs use the docker runner label
+      - name: Verify dependency jobs use matching runner labels
         run: python3 scripts/audit_docker_runner_routing.py
