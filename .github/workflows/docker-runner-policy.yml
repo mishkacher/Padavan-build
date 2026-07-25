@@ -29,10 +29,5 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
       - name: Verify Docker jobs use the docker runner label
-        run: python scripts/audit_docker_runner_routing.py
+        run: python3 scripts/audit_docker_runner_routing.py
