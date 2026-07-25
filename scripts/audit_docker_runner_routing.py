@@ -2,192 +2,114 @@ from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
-WORKFLOW_ROOT = Path(".github/workflows")
-POLICY_WORKFLOW = Path(".github/workflows/docker-runner-policy.yml")
-WORKFLOW_PATTERNS = ("*.yml", "*.yaml")
-
-JOB_RE = re.compile(r"^  (?P<job>[A-Za-z0-9_.-]+):(?:\s*(?:#.*)?)$")
-RUNS_ON_RE = re.compile(r"^    runs-on:\s*(?P<value>.*?)(?:\s+#.*)?$")
-JOB_LEVEL_DOCKER_RE = re.compile(r"^    (?:container|services):(?:\s|$)")
-USES_RE = re.compile(r"^\s+(?:-\s+)?uses:\s*(?P<value>.+?)\s*(?:#.*)?$")
-RUN_RE = re.compile(r"^(?P<indent>\s+)(?:-\s+)?run:\s*(?P<value>.*)$")
-
-DOCKER_COMMAND_RE = re.compile(
-    r"""(?ix)
-    (?:^|[\s;&|()])
-    (?:sudo\s+)?
-    docker(?:\s|$)
-    |
-    (?:^|[\s;&|()])
-    docker-compose(?:\s|$)
-    |
-    \bDOCKER_(?:BUILDKIT|HOST|TLS_VERIFY|CERT_PATH|CONTEXT)\b
-    |
-    \b(?:make|just|task)\s+[^\n#]*(?:docker|container)
-    |
-    (?:^|[\s;&|()])
-    (?:\./)?[\w./-]*docker[\w./-]*\.(?:sh|py)(?:\s|$)
-    """
-)
-DOCKER_LABEL_RE = re.compile(
-    r"(?i)(?:^|[\s,\[\]{}'\"-])docker(?:$|[\s,\[\]{}'\"-])"
-)
+ROOT = Path(".github/workflows")
+SELF = Path(".github/workflows/docker-runner-policy.yml")
+ORDER = ("docker", "postgresql", "redis")
+RUNS_ON = re.compile(r"^    runs-on:\s*(.*?)(?:\s+#.*)?$", re.M)
+LABEL = {name: re.compile(rf"(?i)(?:^|[\s,\[\]{{}}'\"-]){name}(?:$|[\s,\[\]{{}}'\"-])") for name in ORDER}
+DOCKER = re.compile(r"""(?ixm)
+^[ ]{4}(?:container|services):(?:\s|$)|
+^\s+(?:-\s+)?uses:\s*['"]?(?:docker/|docker://)|
+(?:^|[\s;&|()])(?:sudo\s+)?docker(?:-compose)?(?:\s|$)|
+\bDOCKER_(?:BUILDKIT|HOST|TLS_VERIFY|CERT_PATH|CONTEXT)\b
+""")
+POSTGRES = re.compile(r"""(?ixm)
+^\s+(?:postgres|postgresql):(?:\s|$)|
+^\s+image:\s*['"]?postgres(?:ql)?(?::|@|\s|['"]|$)|
+postgres(?:ql)?://|
+\b(?:POSTGRES_[A-Z0-9_]+|PG(?:HOST|PORT|USER|PASSWORD|DATABASE|SSLMODE))\b|
+(?:^|[\s;&|()])(?:sudo\s+)?(?:psql|pg_isready|pg_dump|pg_dumpall|pg_restore|postgres|initdb|createdb|dropdb)(?:\s|$)|
+(?:docker(?:\s+compose)?|docker-compose|make|just|task)[^\n#]*(?:postgres|postgresql)
+""")
+REDIS = re.compile(r"""(?ixm)
+^\s+redis:\s*(?:\s|$)|
+^\s+image:\s*['"]?redis(?::|@|\s|['"]|$)|
+redis(?:s)?://|
+\bREDIS_[A-Z0-9_]+\b|
+(?:^|[\s;&|()])(?:sudo\s+)?redis-(?:cli|server|benchmark|sentinel)(?:\s|$)|
+(?:docker(?:\s+compose)?|docker-compose|make|just|task)[^\n#]*\bredis\b
+""")
+DETECTORS = {"docker": DOCKER, "postgresql": POSTGRES, "redis": REDIS}
 
 
-@dataclass(frozen=True)
-class JobBlock:
-    name: str
-    lines: list[str]
-
-
-def _indent(line: str) -> int:
+def indent(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
-def _workflow_files(root: Path) -> list[Path]:
-    workflow_root = root / WORKFLOW_ROOT
-    return sorted(
-        path
-        for pattern in WORKFLOW_PATTERNS
-        for path in workflow_root.glob(pattern)
-        if path.is_file() and path.relative_to(root) != POLICY_WORKFLOW
-    )
-
-
-def _job_blocks(text: str) -> list[JobBlock]:
+def jobs(text: str) -> list[tuple[str, str]]:
     lines = text.splitlines()
-    jobs_index: int | None = None
-    for index, line in enumerate(lines):
-        if line == "jobs:":
-            jobs_index = index
-            break
-    if jobs_index is None:
+    try:
+        start = lines.index("jobs:") + 1
+    except ValueError:
         return []
-
-    blocks: list[JobBlock] = []
-    current_name: str | None = None
-    current_lines: list[str] = []
-
-    for line in lines[jobs_index + 1 :]:
+    result: list[tuple[str, str]] = []
+    name: str | None = None
+    block: list[str] = []
+    for line in lines[start:]:
         stripped = line.strip()
-        if stripped and not stripped.startswith("#") and _indent(line) == 0:
+        if stripped and not stripped.startswith("#") and indent(line) == 0:
             break
-
-        match = JOB_RE.match(line)
+        match = re.fullmatch(r"  ([A-Za-z0-9_.-]+):(?:\s*#.*)?", line)
         if match:
-            if current_name is not None:
-                blocks.append(JobBlock(current_name, current_lines))
-            current_name = match.group("job")
-            current_lines = [line]
-            continue
-
-        if current_name is not None:
-            current_lines.append(line)
-
-    if current_name is not None:
-        blocks.append(JobBlock(current_name, current_lines))
-    return blocks
+            if name is not None:
+                result.append((name, "\n".join(block)))
+            name, block = match.group(1), [line]
+        elif name is not None:
+            block.append(line)
+    if name is not None:
+        result.append((name, "\n".join(block)))
+    return result
 
 
-def _runs_on_selector(lines: list[str]) -> str | None:
+def selector(block: str) -> str | None:
+    lines = block.splitlines()
     for index, line in enumerate(lines):
-        match = RUNS_ON_RE.match(line)
+        match = RUNS_ON.match(line)
         if not match:
             continue
-
-        value = match.group("value").strip()
-        selector_lines = [value] if value else []
-        base_indent = _indent(line)
-        for continuation in lines[index + 1 :]:
-            stripped = continuation.strip()
-            if not stripped:
-                continue
-            if _indent(continuation) <= base_indent:
+        parts = [match.group(1).strip()] if match.group(1).strip() else []
+        base = indent(line)
+        for extra in lines[index + 1:]:
+            if extra.strip() and indent(extra) <= base:
                 break
-            selector_lines.append(stripped)
-        return " ".join(selector_lines).strip()
+            if extra.strip():
+                parts.append(extra.strip())
+        return " ".join(parts)
     return None
 
 
-def _docker_evidence(lines: list[str]) -> str | None:
-    for line in lines:
-        if JOB_LEVEL_DOCKER_RE.match(line):
-            return line.strip()
-
-        uses_match = USES_RE.match(line)
-        if uses_match:
-            value = uses_match.group("value").strip().strip("\"'")
-            normalized = value.lower()
-            if normalized.startswith("docker/") or normalized.startswith("docker://"):
-                return f"uses: {value}"
-
-    for index, line in enumerate(lines):
-        run_match = RUN_RE.match(line)
-        if not run_match:
-            continue
-
-        inline_value = run_match.group("value").strip()
-        command_lines: list[str] = []
-        if inline_value not in {"", "|", ">", "|-", ">-", "|+", ">+"}:
-            command_lines.append(inline_value)
-
-        run_indent = len(run_match.group("indent"))
-        for continuation in lines[index + 1 :]:
-            stripped = continuation.strip()
-            if stripped and _indent(continuation) <= run_indent:
-                break
-            if stripped:
-                command_lines.append(stripped)
-
-        command = "\n".join(command_lines)
-        if DOCKER_COMMAND_RE.search(command):
-            compact = " ".join(command.split())
-            return f"run: {compact[:160]}"
-
-    return None
-
-
-def audit(root: Path) -> list[str]:
+def audit(repo: Path) -> list[str]:
     errors: list[str] = []
-    for path in _workflow_files(root):
-        text = path.read_text(encoding="utf-8")
-        relative_path = path.relative_to(root)
-
-        for job in _job_blocks(text):
-            evidence = _docker_evidence(job.lines)
-            if evidence is None:
+    for pattern in ("*.yml", "*.yaml"):
+        for path in sorted((repo / ROOT).glob(pattern)):
+            if not path.is_file() or path.relative_to(repo) == SELF:
                 continue
-
-            selector = _runs_on_selector(job.lines)
-            if selector is None:
-                errors.append(
-                    f"{relative_path}:{job.name}: Docker workload detected ({evidence}), "
-                    "but the job has no runs-on selector"
-                )
-                continue
-
-            if DOCKER_LABEL_RE.search(selector) is None:
-                errors.append(
-                    f"{relative_path}:{job.name}: Docker workload detected ({evidence}), "
-                    f"but runs-on is {selector!r}; add the docker label, normally "
-                    "runs-on: [self-hosted, docker]"
-                )
+            for job_name, block in jobs(path.read_text(encoding="utf-8")):
+                required = [name for name in ORDER if DETECTORS[name].search(block)]
+                if not required:
+                    continue
+                current = selector(block)
+                expected = f"[{', '.join(('self-hosted', *required))}]"
+                if current is None:
+                    errors.append(f"{path.relative_to(repo)}:{job_name}: missing runs-on; use {expected}")
+                    continue
+                missing = [name for name in required if not LABEL[name].search(current)]
+                if missing:
+                    errors.append(f"{path.relative_to(repo)}:{job_name}: runs-on {current!r} misses {', '.join(missing)}; normally use {expected}")
     return errors
 
 
 def main() -> int:
-    root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
-    errors = audit(root)
+    repo = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
+    errors = audit(repo)
     if errors:
-        print("Docker runner routing violations:", file=sys.stderr)
+        print("Dependency runner routing violations:", file=sys.stderr)
         for error in errors:
             print(f"- {error}", file=sys.stderr)
         return 1
-
-    print("Docker runner routing policy passed.")
+    print("Dependency runner routing policy passed.")
     return 0
 
 
