@@ -1,0 +1,33 @@
+name: Docker runner policy
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+      - "scripts/audit_docker_runner_routing.py"
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".github/workflows/**"
+      - "scripts/audit_docker_runner_routing.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-runner-policy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit-docker-routing:
+    runs-on: [self-hosted, fast]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Docker jobs use the docker runner label
+        run: python3 scripts/audit_docker_runner_routing.py
