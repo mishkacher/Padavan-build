@@ -1,0 +1,18 @@
+name: Self-hosted runner selector policy
+on:
+  pull_request:
+    paths: ['.github/workflows/**', '.github/scripts/check_runner_selectors.py', '.github/RUNNER_LABELS.md']
+  push:
+    paths: ['.github/workflows/**', '.github/scripts/check_runner_selectors.py', '.github/RUNNER_LABELS.md']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  enforce:
+    runs-on: [self-hosted, fast]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/check_runner_selectors.py
