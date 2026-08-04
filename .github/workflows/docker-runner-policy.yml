@@ -26,10 +26,10 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import textwrap
           source = Path('.github/workflows/normalize-runner-selectors.yml').read_text(encoding='utf-8')
-          script = source.split("python3 - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
-          exec(compile(textwrap.dedent(script), 'runner-normalizer', 'exec'))
+          raw = source.split("python3 - <<'PY'\n", 1)[1].split("\n          PY", 1)[0]
+          script = "\n".join(line[10:] if line.startswith("          ") else line for line in raw.splitlines())
+          exec(compile(script, 'runner-normalizer', 'exec'))
           legacy = Path('.github/workflows/docker-runner-policy.yml')
           if legacy.exists():
               legacy.unlink()
